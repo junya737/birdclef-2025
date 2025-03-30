@@ -95,3 +95,20 @@ def generate_spectrograms(df, cfg):
     print(f"Failed to process {len(errors)} files")
     
     return all_bird_data
+
+
+## Use in inference
+def process_audio_segment(audio_data, cfg):
+    """Process audio segment to get mel spectrogram"""
+    if len(audio_data) < cfg.FS * cfg.WINDOW_SIZE:
+        audio_data = np.pad(audio_data, 
+                          (0, cfg.FS * cfg.WINDOW_SIZE - len(audio_data)), 
+                          mode='constant')
+    
+    mel_spec = audio2melspec(audio_data, cfg)
+    
+    # Resize if needed
+    if mel_spec.shape != cfg.TARGET_SHAPE:
+        mel_spec = cv2.resize(mel_spec, cfg.TARGET_SHAPE, interpolation=cv2.INTER_LINEAR)
+        
+    return mel_spec.astype(np.float32)
