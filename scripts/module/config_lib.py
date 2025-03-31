@@ -17,7 +17,7 @@ class CFG:
             self.submission_csv = '/kaggle/input/birdclef-2025/sample_submission.csv'
             self.taxonomy_csv = '/kaggle/input/birdclef-2025/taxonomy.csv'
             self.spectrogram_npy = '/kaggle/input/birdclef25-mel-spectrograms/birdclef2025_melspec_5sec_256_256.npy'
-            self.model_path = '/kaggle/input/birdclef25-effnetb0-starter-weight'
+            self.model_path = '/kaggle/input/birdclef-2025-0330'
         else:
             self.OUTPUT_DIR = '../data/result/'
             self.train_datadir = '../data/raw/train_audio/'
@@ -43,21 +43,18 @@ class CFG:
         self.HOP_LENGTH = 512
         self.N_MELS = 128
         self.FMIN = 50
-        self.FMAX = 14000
-
-        # ===== Device =====
-        
+        self.FMAX = 14000        
 
         # ===== Training Mode =====
         if mode == "train":
             self.seed = 42
             self.apex = False
             self.print_freq = 100
-            self.num_workers = 2
+            self.num_workers = 1
 
             self.LOAD_DATA = True
             self.epochs = 10
-            self.batch_size = 32
+            self.batch_size = 128
             self.criterion = 'BCEWithLogitsLoss'
 
             self.n_fold = 5
@@ -78,7 +75,8 @@ class CFG:
             if self.debug:
                 self.epochs = 2
                 self.selected_folds = [0]
-
+                self.batch_size = 4
+                
         # ===== Inference Mode =====
         elif mode == "inference":
             self.batch_size = 16
@@ -93,7 +91,3 @@ class CFG:
             
             self.device = "cpu"
             
-    def update_debug_settings(self):
-        if self.debug:
-            self.epochs = 2
-            self.selected_folds = [0]
