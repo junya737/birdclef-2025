@@ -48,13 +48,13 @@ class CFG:
         # ===== Training Mode =====
         if mode == "train":
             self.seed = 42
-            self.apex = False
+            self.apex = True
             self.print_freq = 100
-            self.num_workers = 1
+            self.num_workers = 4
 
             self.LOAD_DATA = True
-            self.epochs = 10
-            self.batch_size = 128
+            self.epochs = 40
+            self.batch_size = 512
             self.criterion = 'BCEWithLogitsLoss'
 
             self.n_fold = 5
@@ -80,7 +80,7 @@ class CFG:
         # ===== Inference Mode =====
         elif mode == "inference":
             self.batch_size = 16
-            self.use_tta = False
+            self.use_tta = True
             self.tta_count = 3
             self.threshold = 0.5
 
