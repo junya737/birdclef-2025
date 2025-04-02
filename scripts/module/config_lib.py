@@ -2,7 +2,7 @@ import torch
 
 
 class CFG:
-    def __init__(self, mode="train", kaggle_notebook=False, debug=True):
+    def __init__(self, mode="train", kaggle_notebook=False, debug=False):
         assert mode in ["train", "inference"], "mode must be 'train' or 'inference'"
         self.mode = mode
         self.KAGGLE_NOTEBOOK = kaggle_notebook
@@ -26,8 +26,8 @@ class CFG:
             self.submission_csv = '../data/raw/sample_submission.csv'
             self.taxonomy_csv = '../data/raw/taxonomy.csv'
             self.spectrogram_npy = '../data/processed/mel-spec_0329/birdclef2025_melspec_5sec_256_256.npy'
-            self.MODEL_DIR = "../models/"
-            self.model_path = self.MODEL_DIR
+            self.model_dir = "../models/"
+            self.model_path = self.model_dir
 
         # ===== Model Settings =====
         self.model_name = 'efficientnet_b0'
@@ -48,13 +48,13 @@ class CFG:
         # ===== Training Mode =====
         if mode == "train":
             self.seed = 42
-            self.apex = True
+            self.apex = False
             self.print_freq = 100
-            self.num_workers = 4
+            self.num_workers = 2
 
             self.LOAD_DATA = True
-            self.epochs = 40
-            self.batch_size = 512
+            self.epochs = 10
+            self.batch_size = 32
             self.criterion = 'BCEWithLogitsLoss'
 
             self.n_fold = 5
@@ -80,7 +80,7 @@ class CFG:
         # ===== Inference Mode =====
         elif mode == "inference":
             self.batch_size = 16
-            self.use_tta = True
+            self.use_tta = False
             self.tta_count = 3
             self.threshold = 0.5
 
