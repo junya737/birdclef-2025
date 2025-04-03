@@ -1,5 +1,5 @@
 import torch
-
+import os
 
 class CFG:
     def __init__(self, mode="train", kaggle_notebook=False, debug=False):
@@ -26,8 +26,8 @@ class CFG:
             self.submission_csv = '../data/raw/sample_submission.csv'
             self.taxonomy_csv = '../data/raw/taxonomy.csv'
             self.spectrogram_npy = '../data/processed/mel-spec_0329/birdclef2025_melspec_5sec_256_256.npy'
-            self.model_dir = "../models/"
-            self.model_path = self.model_dir
+            self.models_dir = "../models/" # 全modelの保存先
+            self.model_path = self.models_dir # 各モデルの保存先．学習時に動的に変更．
 
         # ===== Model Settings =====
         self.model_name = 'efficientnet_b0'
