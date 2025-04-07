@@ -23,6 +23,8 @@ class BirdCLEFDatasetFromNPY(Dataset):
         if 'filepath' not in self.df.columns:
             self.df['filepath'] = self.cfg.train_datadir + '/' + self.df.filename
         
+        # filename: 126247/XC941297.ogg samplename: 126247-XC941297
+        # spectrograms のkey がsamplename みたいになっているから．
         if 'samplename' not in self.df.columns:
             self.df['samplename'] = self.df.filename.map(lambda x: x.split('/')[0] + '-' + x.split('/')[-1].split('.')[0])
 
@@ -36,6 +38,7 @@ class BirdCLEFDatasetFromNPY(Dataset):
     
     def __len__(self):
         return len(self.df)
+    
     
     def __getitem__(self, idx):
         row = self.df.iloc[idx]
@@ -130,3 +133,45 @@ def collate_fn(batch):
                 result[key] = torch.stack(result[key])
     
     return result
+
+# pseudo labelsをmixupするデータセット．
+class BirdCLEFDatasetWithPseudo(Dataset):
+    def __init__(self, train_df, pseudo_df, cfg, spectrograms, pseudo_melspecs, mode="train"):
+        self.train_df = train_df.reset_index(drop=True)
+        self.pseudo_df = pseudo_df.set_index("row_id")
+        self.cfg = cfg
+        self.mode = mode
+        self.spectrograms = spectrograms
+        self.pseudo_melspecs = pseudo_melspecs
+        self.use_pseudo_mixup = cfg.use_pseudo_mixup
+        self.pseudo_mix_prob = cfg.pseudo_mix_prob  # ← cfgから取得
+
+        taxonomy_df = pd.read_csv(cfg.taxonomy_csv)
+        self.species_ids = taxonomy_df['primary_label'].tolist()
+        self.num_classes = len(self.species_ids)
+        self.label_to_idx = {label: idx for idx, label in enumerate(self.species_ids)}
+
+        self.train_df["samplename"] = self.train_df["filename"].apply(
+            lambda x: x.split('/')[0] + '-' + x.split('/')[-1].split('.')[0]
+        )
+
+    def __getitem__(self, idx):
+        row = self.train_df.iloc[idx]
+        samplename = row["samplename"]
+        spec = self.spectrograms.get(samplename, np.zeros(self.cfg.TARGET_SHAPE, dtype=np.float32))
+        label = self._encode_label(row)
+
+        if self.mode == "train" and self.use_pseudo_mixup and random.random() < self.pseudo_mix_prob:
+            pseudo_row_id = random.choice(self.pseudo_df.index)
+            pseudo_spec = self.pseudo_melspecs.get(pseudo_row_id, np.zeros(self.cfg.TARGET_SHAPE, dtype=np.float32))
+            pseudo_label = self.pseudo_df.loc[pseudo_row_id][self.species_ids].values.astype(np.float32)
+
+            lam = np.random.beta(self.cfg.mixup_alpha, self.cfg.mixup_alpha)
+            spec = lam * spec + (1 - lam) * pseudo_spec
+            label = np.maximum(label, pseudo_label)
+
+        return {
+            "melspec": torch.tensor(spec, dtype=torch.float32).unsqueeze(0),
+            "target": torch.tensor(label, dtype=torch.float32),
+            "filename": row["filename"]
+        }
