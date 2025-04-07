@@ -154,6 +154,9 @@ class BirdCLEFDatasetWithPseudo(Dataset):
         self.train_df["samplename"] = self.train_df["filename"].apply(
             lambda x: x.split('/')[0] + '-' + x.split('/')[-1].split('.')[0]
         )
+    
+    def __len__(self):
+        return len(self.train_df)
 
     def __getitem__(self, idx):
         row = self.train_df.iloc[idx]
@@ -175,3 +178,24 @@ class BirdCLEFDatasetWithPseudo(Dataset):
             "target": torch.tensor(label, dtype=torch.float32),
             "filename": row["filename"]
         }
+    
+    def _encode_label(self, row):
+        target = np.zeros(self.num_classes, dtype=np.float32)
+        if row["primary_label"] in self.label_to_idx:
+            target[self.label_to_idx[row["primary_label"]]] = 1.0
+
+        if "secondary_labels" in row and pd.notnull(row["secondary_labels"]):
+            try:
+                if isinstance(row["secondary_labels"], str):
+                    secondary = eval(row["secondary_labels"])
+                else:
+                    secondary = row["secondary_labels"]
+
+                for label in secondary:
+                    if label in self.label_to_idx:
+                        target[self.label_to_idx[label]] = 1.0
+            except Exception:
+                pass
+
+        return target
+        
