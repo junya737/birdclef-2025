@@ -19,6 +19,7 @@ def find_model_files(cfg):
     
     return model_files
 
+# 推論の読み込み専用．訓練再開には使えない．
 def load_models(cfg, num_classes):
     """
     Load all found model files and prepare them for ensemble
@@ -49,6 +50,7 @@ def load_models(cfg, num_classes):
             model = BirdCLEFModelForInference(cfg, num_classes)
             model.load_state_dict(checkpoint['model_state_dict'])
             model = model.to(cfg.device)
+            # 推論モード
             model.eval()
             
             models.append(model)
@@ -174,5 +176,119 @@ class BirdCLEFModelForInference(nn.Module):
             features = self.pooling(features)
             features = features.view(features.size(0), -1)
         
+        logits = self.classifier(features)
+        return logits
+
+# Classifier に BatchNormとDropoutを追加
+class BirdCLEFModelBnForTrain(nn.Module):
+    def __init__(self, cfg):
+        super().__init__()
+        self.cfg = cfg
+
+        taxonomy_df = pd.read_csv(cfg.taxonomy_csv)
+        cfg.num_classes = len(taxonomy_df)
+
+        self.backbone = timm.create_model(
+            cfg.model_name,
+            pretrained=cfg.pretrained,
+            in_chans=cfg.in_channels,
+            drop_rate=0.2,
+            drop_path_rate=0.2
+        )
+
+        if 'efficientnet' in cfg.model_name:
+            backbone_out = self.backbone.classifier.in_features
+            self.backbone.classifier = nn.Identity()
+        elif 'resnet' in cfg.model_name:
+            backbone_out = self.backbone.fc.in_features
+            self.backbone.fc = nn.Identity()
+        else:
+            backbone_out = self.backbone.get_classifier().in_features
+            self.backbone.reset_classifier(0, '')
+
+        self.pooling = nn.AdaptiveAvgPool2d(1)
+        self.feat_dim = backbone_out
+
+        dropout_rate = getattr(cfg, 'classifier_dropout', 0.3)
+
+        self.classifier = nn.Sequential(
+            nn.Linear(backbone_out, 512),
+            nn.BatchNorm1d(512),
+            nn.ReLU(),
+            nn.Dropout(dropout_rate),
+            nn.Linear(512, cfg.num_classes)
+        )
+
+        self.mixup_enabled = hasattr(cfg, 'mixup_alpha') and cfg.mixup_alpha > 0
+        if self.mixup_enabled:
+            self.mixup_alpha = cfg.mixup_alpha
+
+    def forward(self, x, targets=None):
+        if self.training and self.mixup_enabled and targets is not None:
+            mixed_x, targets_a, targets_b, lam = self.mixup_data(x, targets)
+            x = mixed_x
+        else:
+            targets_a, targets_b, lam = None, None, None
+
+        features = self.backbone(x)
+        if isinstance(features, dict):
+            features = features['features']
+        if len(features.shape) == 4:
+            features = self.pooling(features)
+            features = features.view(features.size(0), -1)
+
+        logits = self.classifier(features)
+
+        if self.training and self.mixup_enabled and targets is not None:
+            loss = self.mixup_criterion(F.binary_cross_entropy_with_logits,
+                                        logits, targets_a, targets_b, lam)
+            return logits, loss
+
+        return logits
+    
+class BirdCLEFModelBnForInference(nn.Module):
+    def __init__(self, cfg, num_classes):
+        super().__init__()
+        self.cfg = cfg
+
+        self.backbone = timm.create_model(
+            cfg.model_name,
+            pretrained=False,
+            in_chans=cfg.in_channels,
+            drop_rate=0.0,
+            drop_path_rate=0.0
+        )
+
+        if 'efficientnet' in cfg.model_name:
+            backbone_out = self.backbone.classifier.in_features
+            self.backbone.classifier = nn.Identity()
+        elif 'resnet' in cfg.model_name:
+            backbone_out = self.backbone.fc.in_features
+            self.backbone.fc = nn.Identity()
+        else:
+            backbone_out = self.backbone.get_classifier().in_features
+            self.backbone.reset_classifier(0, '')
+
+        self.pooling = nn.AdaptiveAvgPool2d(1)
+        self.feat_dim = backbone_out
+
+        dropout_rate = getattr(cfg, 'classifier_dropout', 0.3)
+
+        self.classifier = nn.Sequential(
+            nn.Linear(backbone_out, 512),
+            nn.BatchNorm1d(512),
+            nn.ReLU(),
+            nn.Dropout(dropout_rate),
+            nn.Linear(512, num_classes)
+        )
+
+    def forward(self, x):
+        features = self.backbone(x)
+        if isinstance(features, dict):
+            features = features['features']
+        if len(features.shape) == 4:
+            features = self.pooling(features)
+            features = features.view(features.size(0), -1)
+
         logits = self.classifier(features)
         return logits
