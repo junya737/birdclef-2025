@@ -9,6 +9,7 @@ import torch
 
 from IPython.display import Audio
 import librosa
+import matplotlib.pyplot as plt
 
 
 def set_seed(seed=42):
@@ -104,3 +105,25 @@ def inverse_melspec(mel_spec_norm, config):
     )
 
     return Audio(waveform, rate=config.FS)
+
+
+def plot_melspectrogram(spec: dict, species_id: str, 
+                        fmin: int = 50, fmax: int = 16000, 
+                        duration: float = 5.0,
+                        figsize=(6, 4), cmap='magma'):
+
+    if species_id not in spec:
+        print(f"[ERROR] '{species_id}' not found in spec!")
+        return
+
+    mel = spec[species_id]  # shape: (n_mels, time_steps)
+    extent = [0, duration, fmin, fmax]
+
+    plt.figure(figsize=figsize)
+    plt.imshow(mel, aspect='auto', origin='lower', cmap=cmap, extent=extent)
+    plt.title(f"MelSpectrogram of {species_id}")
+    plt.xlabel("Time (sec)")
+    plt.ylabel("Frequency (Hz)")
+    plt.colorbar(label='Amplitude')
+    plt.tight_layout()
+    plt.show()
