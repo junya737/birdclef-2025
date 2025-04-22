@@ -6,6 +6,103 @@ from torch.utils.data import Dataset
 
 
 
+# label2idx, idx2labelを外部から受け取るように変更
+class BirdCLEFDatasetFromNPY_Labeled(Dataset):
+    def __init__(self, df, cfg, spectrograms=None, mode="train", label2idx=None, idx2label=None):
+        self.df = df
+        self.cfg = cfg
+        self.mode = mode
+        self.spectrograms = spectrograms
+
+        # ラベルマッピングを外部から受け取る
+        assert label2idx is not None, "label2idx is required"
+        self.label2idx = label2idx
+        self.idx2label = idx2label or {i: l for l, i in label2idx.items()}
+        self.num_classes = len(self.label2idx)
+        
+        print(idx2label)
+
+        # samplenameの生成
+        if 'samplename' not in self.df.columns:
+            self.df['samplename'] = self.df.filename.map(
+                lambda x: x.split('/')[0] + '-' + x.split('/')[-1].split('.')[0]
+            )
+
+        # デバッグ用にサンプルを絞る
+        if self.cfg.debug:
+            self.df = self.df.sample(min(1000, len(self.df)), random_state=self.cfg.seed).reset_index(drop=True)
+
+        # 存在確認ログ
+        sample_names = set(self.df['samplename'])
+        if self.spectrograms:
+            found_samples = sum(1 for name in sample_names if name in self.spectrograms)
+            print(f"Found {found_samples} matching spectrograms for {mode} dataset out of {len(self.df)} samples")
+
+    def __len__(self):
+        return len(self.df)
+
+    def __getitem__(self, idx):
+        row = self.df.iloc[idx]
+        samplename = row['samplename']
+        spec = self.spectrograms.get(samplename, None)
+
+        if spec is None:
+            spec = np.zeros(self.cfg.TARGET_SHAPE, dtype=np.float32)
+            if self.mode == "train":
+                print(f"Warning: Spectrogram for {samplename} not found")
+
+        spec = torch.tensor(spec, dtype=torch.float32).unsqueeze(0)  # (1, H, W)
+
+        if self.mode == "train" and np.random.rand() < self.cfg.aug_prob:
+            spec = self.apply_spec_augmentations(spec)
+
+        # one-hotラベル
+        target = self.encode_label(row['primary_label'])
+
+        # secondary labelsも使うならここで追加
+        if 'secondary_labels' in row and row['secondary_labels'] not in [[''], None, np.nan]:
+            if isinstance(row['secondary_labels'], str):
+                secondary_labels = eval(row['secondary_labels'])
+            else:
+                secondary_labels = row['secondary_labels']
+
+            for label in secondary_labels:
+                if label in self.label2idx:
+                    target[self.label2idx[label]] = 1.0
+
+        return {
+            'melspec': spec,
+            'target': torch.tensor(target, dtype=torch.float32),
+            'filename': row['filename']
+        }
+
+    def encode_label(self, label):
+        target = np.zeros(self.num_classes)
+        if label in self.label2idx:
+            target[self.label2idx[label]] = 1.0
+        return target
+    
+    def apply_spec_augmentations(self, spec):
+        if np.random.rand() < 0.5:
+            for _ in range(np.random.randint(1, 3)):
+                width = np.random.randint(5, 20)
+                start = np.random.randint(0, spec.shape[2] - width)
+                spec[0, :, start:start+width] = 0
+
+        if np.random.rand() < 0.5:
+            for _ in range(np.random.randint(1, 3)):
+                height = np.random.randint(5, 20)
+                start = np.random.randint(0, spec.shape[1] - height)
+                spec[0, start:start+height, :] = 0
+
+        if np.random.rand() < 0.5:
+            gain = np.random.uniform(0.8, 1.2)
+            bias = np.random.uniform(-0.1, 0.1)
+            spec = spec * gain + bias
+            spec = torch.clamp(spec, 0, 1)
+
+        return spec
+
 
 class BirdCLEFDatasetFromNPY(Dataset):
     def __init__(self, df, cfg, spectrograms=None, mode="train"):
@@ -169,7 +266,7 @@ class BirdCLEFDatasetWithPseudo(Dataset):
             pseudo_spec = self.pseudo_melspecs.get(pseudo_row_id, np.zeros(self.cfg.TARGET_SHAPE, dtype=np.float32))
             pseudo_label = self.pseudo_df.loc[pseudo_row_id][self.species_ids].values.astype(np.float32)
 
-            lam = np.random.beta(self.cfg.mixup_alpha, self.cfg.mixup_alpha)
+            lam = np.random.beta(self.cfg.mixup_alpha_real, self.cfg.mixup_alpha_pseudo)
             spec = lam * spec + (1 - lam) * pseudo_spec
             label = np.maximum(label, pseudo_label)
 
