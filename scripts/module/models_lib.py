@@ -65,9 +65,6 @@ class BirdCLEFModelForTrain(nn.Module):
         super().__init__()
         self.cfg = cfg
         
-        taxonomy_df = pd.read_csv(cfg.taxonomy_csv)
-        cfg.num_classes = len(taxonomy_df)
-        
         self.backbone = timm.create_model(
             cfg.model_name,
             pretrained=cfg.pretrained,
