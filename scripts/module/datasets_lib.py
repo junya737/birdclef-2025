@@ -5,103 +5,110 @@ import torch
 from torch.utils.data import Dataset
 
 
-
-# label2idx, idx2labelを外部から受け取るように変更
 class BirdCLEFDatasetFromNPY_Labeled(Dataset):
     def __init__(self, df, cfg, spectrograms=None, mode="train", label2idx=None, idx2label=None):
         self.df = df
         self.cfg = cfg
         self.mode = mode
         self.spectrograms = spectrograms
-
-        # ラベルマッピングを外部から受け取る
-        assert label2idx is not None, "label2idx is required"
-        self.label2idx = label2idx
-        self.idx2label = idx2label or {i: l for l, i in label2idx.items()}
-        self.num_classes = len(self.label2idx)
+        self.label_to_idx = label2idx
+        self.idx_to_label = idx2label
         
-        print(idx2label)
+        self.species_ids = label2idx.keys() if label2idx else []
+        self.num_classes = len(self.species_ids)
 
-        # samplenameの生成
+        if 'filepath' not in self.df.columns:
+            self.df['filepath'] = self.cfg.train_datadir + '/' + self.df.filename
+        
+        # filename: 126247/XC941297.ogg samplename: 126247-XC941297
+        # spectrograms のkey がsamplename みたいになっているから．
         if 'samplename' not in self.df.columns:
-            self.df['samplename'] = self.df.filename.map(
-                lambda x: x.split('/')[0] + '-' + x.split('/')[-1].split('.')[0]
-            )
+            self.df['samplename'] = self.df.filename.map(lambda x: x.split('/')[0] + '-' + x.split('/')[-1].split('.')[0])
 
-        # デバッグ用にサンプルを絞る
-        if self.cfg.debug:
-            self.df = self.df.sample(min(1000, len(self.df)), random_state=self.cfg.seed).reset_index(drop=True)
-
-        # 存在確認ログ
         sample_names = set(self.df['samplename'])
         if self.spectrograms:
             found_samples = sum(1 for name in sample_names if name in self.spectrograms)
             print(f"Found {found_samples} matching spectrograms for {mode} dataset out of {len(self.df)} samples")
-
+        
+        if cfg.debug:
+            self.df = self.df.sample(min(1000, len(self.df)), random_state=cfg.seed).reset_index(drop=True)
+    
     def __len__(self):
         return len(self.df)
-
+    
+    
     def __getitem__(self, idx):
         row = self.df.iloc[idx]
         samplename = row['samplename']
-        spec = self.spectrograms.get(samplename, None)
+        spec = None
 
+        if self.spectrograms and samplename in self.spectrograms:
+            spec = self.spectrograms[samplename]
+            
         if spec is None:
             spec = np.zeros(self.cfg.TARGET_SHAPE, dtype=np.float32)
-            if self.mode == "train":
-                print(f"Warning: Spectrogram for {samplename} not found")
+            if self.mode == "train":  # Only print warning during training
+                print(f"Warning: Spectrogram for {samplename} not found and could not be generated")
 
-        spec = torch.tensor(spec, dtype=torch.float32).unsqueeze(0)  # (1, H, W)
+        spec = torch.tensor(spec, dtype=torch.float32).unsqueeze(0)  # Add channel dimension
 
-        if self.mode == "train" and np.random.rand() < self.cfg.aug_prob:
+        if self.mode == "train" and random.random() < self.cfg.aug_prob:
             spec = self.apply_spec_augmentations(spec)
-
-        # one-hotラベル
+        
         target = self.encode_label(row['primary_label'])
-
-        # secondary labelsも使うならここで追加
+        
         if 'secondary_labels' in row and row['secondary_labels'] not in [[''], None, np.nan]:
             if isinstance(row['secondary_labels'], str):
                 secondary_labels = eval(row['secondary_labels'])
             else:
                 secondary_labels = row['secondary_labels']
-
+            
             for label in secondary_labels:
-                if label in self.label2idx:
-                    target[self.label2idx[label]] = 1.0
-
+                if label in self.label_to_idx:
+                    target[self.label_to_idx[label]] = 1.0
+        
         return {
-            'melspec': spec,
+            'melspec': spec, 
             'target': torch.tensor(target, dtype=torch.float32),
             'filename': row['filename']
         }
-
-    def encode_label(self, label):
-        target = np.zeros(self.num_classes)
-        if label in self.label2idx:
-            target[self.label2idx[label]] = 1.0
-        return target
     
     def apply_spec_augmentations(self, spec):
-        if np.random.rand() < 0.5:
-            for _ in range(np.random.randint(1, 3)):
-                width = np.random.randint(5, 20)
-                start = np.random.randint(0, spec.shape[2] - width)
+        """Apply augmentations to spectrogram"""
+    
+        # Time masking (horizontal stripes)
+        if random.random() < 0.5:
+            num_masks = random.randint(1, 3)
+            for _ in range(num_masks):
+                width = random.randint(5, 20)
+                start = random.randint(0, spec.shape[2] - width)
                 spec[0, :, start:start+width] = 0
-
-        if np.random.rand() < 0.5:
-            for _ in range(np.random.randint(1, 3)):
-                height = np.random.randint(5, 20)
-                start = np.random.randint(0, spec.shape[1] - height)
+        
+        # Frequency masking (vertical stripes)
+        if random.random() < 0.5:
+            num_masks = random.randint(1, 3)
+            for _ in range(num_masks):
+                height = random.randint(5, 20)
+                start = random.randint(0, spec.shape[1] - height)
                 spec[0, start:start+height, :] = 0
-
-        if np.random.rand() < 0.5:
-            gain = np.random.uniform(0.8, 1.2)
-            bias = np.random.uniform(-0.1, 0.1)
+        
+        # Random brightness/contrast
+        if random.random() < 0.5:
+            gain = random.uniform(0.8, 1.2)
+            bias = random.uniform(-0.1, 0.1)
             spec = spec * gain + bias
-            spec = torch.clamp(spec, 0, 1)
-
+            spec = torch.clamp(spec, 0, 1) 
+            
         return spec
+    
+    def encode_label(self, label):
+        """Encode label to one-hot vector"""
+        target = np.zeros(self.num_classes)
+        if label in self.label_to_idx:
+            target[self.label_to_idx[label]] = 1.0
+        return target
+    
+
 
 
 class BirdCLEFDatasetFromNPY(Dataset):
