@@ -127,3 +127,26 @@ def plot_melspectrogram(spec: dict, species_id: str,
     plt.colorbar(label='Amplitude')
     plt.tight_layout()
     plt.show()
+    
+import librosa
+import librosa.display
+import matplotlib.pyplot as plt
+from IPython.display import Audio
+
+def plot_and_play_audio(filename, base_dir, sr=32000):
+    """
+    音声ファイルをロードして、波形プロットと再生を同時に行う
+    """
+    filepath = os.path.join(base_dir, filename)
+    y, _ = librosa.load(filepath, sr=sr)
+
+    # 波形プロット
+    plt.figure(figsize=(14, 3))
+    librosa.display.waveshow(y, sr=sr)
+    plt.title(f"Waveform: {filename}")
+    plt.xlabel("Time (s)")
+    plt.ylabel("Amplitude")
+    plt.show()
+
+    # 音声再生
+    return Audio(y, rate=sr)
