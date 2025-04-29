@@ -25,7 +25,7 @@ from torch.utils.data import DataLoader
 import matplotlib.pyplot as plt
 from tqdm.auto import tqdm
 import json
-
+import torchvision
 
 
 
@@ -85,13 +85,39 @@ def get_scheduler(optimizer, cfg):
         
     return scheduler
 
+
+
+class FocalLossBCE(nn.Module):
+    def __init__(self, alpha=0.25, gamma=2.0, reduction='mean', bce_weight=0.6, focal_weight=1.4):
+        super().__init__()
+        self.alpha = alpha
+        self.gamma = gamma
+        self.reduction = reduction
+        self.bce_weight = bce_weight
+        self.focal_weight = focal_weight
+        self.bce = nn.BCEWithLogitsLoss(reduction=reduction)
+
+    def forward(self, logits, targets):
+        focal_loss = torchvision.ops.focal_loss.sigmoid_focal_loss(
+            inputs=logits,
+            targets=targets,
+            alpha=self.alpha,
+            gamma=self.gamma,
+            reduction=self.reduction,
+        )
+        bce_loss = self.bce(logits, targets)
+        return self.bce_weight * bce_loss + self.focal_weight * focal_loss
+
+
 def get_criterion(cfg):
- 
     if cfg.criterion == 'BCEWithLogitsLoss':
         criterion = nn.BCEWithLogitsLoss()
+    elif cfg.criterion == 'CrossEntropyLoss':
+        criterion = nn.CrossEntropyLoss()
+    elif cfg.criterion == 'FocalLossBCE':
+        return FocalLossBCE(alpha=0.25, gamma=2.0, reduction='mean', bce_weight=0.6, focal_weight=1.4)
     else:
         raise NotImplementedError(f"Criterion {cfg.criterion} not implemented")
-        
     return criterion
 
 
