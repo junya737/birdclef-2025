@@ -52,7 +52,17 @@ class BirdCLEFDatasetFromNPY_Labeled(Dataset):
                 print(f"Warning: Spectrogram for {samplename} not found and could not be generated")
 
         "TODO: 3chに対応できるように．"
-        spec = torch.tensor(spec, dtype=torch.float32).unsqueeze(0)  # Add channel dimension
+        
+        spec = torch.tensor(spec, dtype=torch.float32)
+        if spec.ndim == 2:
+            # (H, W) → (1, H, W)
+            spec = spec.unsqueeze(0)
+        elif spec.ndim == 3 and spec.shape[0] != 1:
+            # already (3, H, W) etc → do nothing
+            pass
+        else:
+            raise ValueError(f"Unexpected spectrogram shape: {spec.shape}")
+
 
         if self.mode == "train" and random.random() < self.cfg.aug_prob:
             spec = self.apply_spec_augmentations(spec)
