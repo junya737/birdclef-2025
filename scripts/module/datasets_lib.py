@@ -5,6 +5,109 @@ import torch
 from torch.utils.data import Dataset
 
 
+class BirdCLEFDatasetFromNPY_Mixup(Dataset):
+    def __init__(self, df, cfg, spectrograms=None, mode="train", label2idx=None, idx2label=None):
+        self.df = df
+        self.cfg = cfg
+        self.mode = mode
+        self.spectrograms = spectrograms
+        self.label_to_idx = label2idx
+        self.idx_to_label = idx2label
+        self.species_ids = label2idx.keys() if label2idx else []
+        self.num_classes = len(self.species_ids)
+
+        if 'filepath' not in self.df.columns:
+            self.df['filepath'] = self.cfg.train_datadir + '/' + self.df.filename
+
+        if 'samplename' not in self.df.columns:
+            self.df['samplename'] = self.df.filename.map(lambda x: x.split('/')[0] + '-' + x.split('/')[-1].split('.')[0])
+
+        if cfg.debug:
+            self.df = self.df.sample(min(1000, len(self.df)), random_state=cfg.seed).reset_index(drop=True)
+
+    def __len__(self):
+        return len(self.df)
+
+    def __getitem__(self, idx):
+        row1 = self.df.iloc[idx]
+        spec1 = self._get_spec(row1['samplename'])
+        label1 = self._get_label(row1)
+
+        # === Mixup ===
+        if self.mode == "train" and self.cfg.use_mixup and random.random() < self.cfg.mixup_prob:
+            idx2 = random.randint(0, len(self.df) - 1)
+            row2 = self.df.iloc[idx2]
+            spec2 = self._get_spec(row2['samplename'])
+            label2 = self._get_label(row2)
+
+            lam = np.random.beta(self.cfg.mixup_alpha, self.cfg.mixup_alpha)
+            spec = lam * spec1 + (1 - lam) * spec2
+            label = lam * label1 + (1 - lam) * label2
+        else:
+            spec = spec1
+            label = label1
+
+        return {
+            'melspec': spec,
+            'target': torch.tensor(label, dtype=torch.float32),
+            'filename': row1['filename']
+        }
+
+    def _get_spec(self, samplename):
+        if self.spectrograms and samplename in self.spectrograms:
+            spec = self.spectrograms[samplename]
+        else:
+            spec = np.zeros(self.cfg.TARGET_SHAPE, dtype=np.float32)
+            if self.mode == "train":
+                print(f"Warning: Spectrogram not found: {samplename}")
+
+        spec = torch.tensor(spec, dtype=torch.float32)
+        if spec.ndim == 2:
+            spec = spec.unsqueeze(0)
+
+        if self.mode == "train" and random.random() < self.cfg.aug_prob:
+            spec = self.apply_spec_augmentations(spec)
+
+        return spec
+
+    def _get_label(self, row):
+        target = np.zeros(self.num_classes, dtype=np.float32)
+        if row['primary_label'] in self.label_to_idx:
+            target[self.label_to_idx[row['primary_label']]] = 1.0
+
+        if 'secondary_labels' in row and row['secondary_labels'] not in [[''], None, np.nan]:
+            if isinstance(row['secondary_labels'], str):
+                secondary_labels = eval(row['secondary_labels'])
+            else:
+                secondary_labels = row['secondary_labels']
+            for label in secondary_labels:
+                if label in self.label_to_idx:
+                    target[self.label_to_idx[label]] = 1.0
+
+        return target
+
+    def apply_spec_augmentations(self, spec):
+        if random.random() < 0.5:
+            for _ in range(random.randint(1, 3)):
+                width = random.randint(5, 20)
+                start = random.randint(0, spec.shape[2] - width)
+                spec[0, :, start:start+width] = 0
+
+        if random.random() < 0.5:
+            for _ in range(random.randint(1, 3)):
+                height = random.randint(5, 20)
+                start = random.randint(0, spec.shape[1] - height)
+                spec[0, start:start+height, :] = 0
+
+        if random.random() < 0.5:
+            gain = random.uniform(0.8, 1.2)
+            bias = random.uniform(-0.1, 0.1)
+            spec = spec * gain + bias
+            spec = torch.clamp(spec, 0, 1)
+
+        return spec
+
+
 class BirdCLEFDatasetFromNPY_Labeled(Dataset):
     def __init__(self, df, cfg, spectrograms=None, mode="train", label2idx=None, idx2label=None):
         self.df = df
