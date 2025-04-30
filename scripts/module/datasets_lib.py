@@ -5,6 +5,102 @@ import torch
 from torch.utils.data import Dataset
 
 
+
+class BirdCLEFDatasetFromNPY_CELoss(Dataset):
+    def __init__(self, df, cfg, spectrograms=None, mode="train", label2idx=None, idx2label=None):
+        self.df = df
+        self.cfg = cfg
+        self.mode = mode
+        self.spectrograms = spectrograms
+        self.label_to_idx = label2idx
+        self.idx_to_label = idx2label
+        
+        self.species_ids = label2idx.keys() if label2idx else []
+        self.num_classes = len(self.species_ids)
+
+
+        if 'filepath' not in self.df.columns:
+            self.df['filepath'] = self.cfg.train_datadir + '/' + self.df.filename
+        
+        # filename: 126247/XC941297.ogg samplename: 126247-XC941297
+        # spectrograms のkey がsamplename みたいになっているから．
+        if 'samplename' not in self.df.columns:
+            self.df['samplename'] = self.df.filename.map(lambda x: x.split('/')[0] + '-' + x.split('/')[-1].split('.')[0])
+
+        sample_names = set(self.df['samplename'])
+        if self.spectrograms:
+            found_samples = sum(1 for name in sample_names if name in self.spectrograms)
+            print(f"Found {found_samples} matching spectrograms for {mode} dataset out of {len(self.df)} samples")
+        
+        if cfg.debug:
+            self.df = self.df.sample(min(1000, len(self.df)), random_state=cfg.seed).reset_index(drop=True)
+    
+    def __len__(self):
+        return len(self.df)
+    
+    
+    def __getitem__(self, idx):
+        row = self.df.iloc[idx]
+        samplename = row['samplename']
+        spec = None
+
+        if self.spectrograms and samplename in self.spectrograms:
+            spec = self.spectrograms[samplename]
+            
+        if spec is None:
+            spec = np.zeros(self.cfg.TARGET_SHAPE, dtype=np.float32)
+            if self.mode == "train":  # Only print warning during training
+                print(f"Warning: Spectrogram for {samplename} not found and could not be generated")
+
+        spec = torch.tensor(spec, dtype=torch.float32).unsqueeze(0)  # Add channel dimension
+
+        if self.mode == "train" and random.random() < self.cfg.aug_prob:
+            spec = self.apply_spec_augmentations(spec)
+        
+        target = self.encode_label(row['primary_label'])
+        
+        return {
+            'melspec': spec, 
+            'target': torch.tensor(target, dtype=torch.long),
+            'filename': row['filename']
+        }
+    
+    def apply_spec_augmentations(self, spec):
+        """Apply augmentations to spectrogram"""
+    
+        # Time masking (horizontal stripes)
+        if random.random() < 0.5:
+            num_masks = random.randint(1, 3)
+            for _ in range(num_masks):
+                width = random.randint(5, 20)
+                start = random.randint(0, spec.shape[2] - width)
+                spec[0, :, start:start+width] = 0
+        
+        # Frequency masking (vertical stripes)
+        if random.random() < 0.5:
+            num_masks = random.randint(1, 3)
+            for _ in range(num_masks):
+                height = random.randint(5, 20)
+                start = random.randint(0, spec.shape[1] - height)
+                spec[0, start:start+height, :] = 0
+        
+        # Random brightness/contrast
+        if random.random() < 0.5:
+            gain = random.uniform(0.8, 1.2)
+            bias = random.uniform(-0.1, 0.1)
+            spec = spec * gain + bias
+            spec = torch.clamp(spec, 0, 1) 
+            
+        return spec
+    
+    def encode_label(self, label):
+        """Encode label to integer index"""
+        if label in self.label_to_idx:
+            return self.label_to_idx[label]
+        else:
+            return -1  # エラー防止
+    
+
 class BirdCLEFDatasetFromNPY_Labeled(Dataset):
     def __init__(self, df, cfg, spectrograms=None, mode="train", label2idx=None, idx2label=None):
         self.df = df
@@ -16,6 +112,7 @@ class BirdCLEFDatasetFromNPY_Labeled(Dataset):
         
         self.species_ids = label2idx.keys() if label2idx else []
         self.num_classes = len(self.species_ids)
+
 
         if 'filepath' not in self.df.columns:
             self.df['filepath'] = self.cfg.train_datadir + '/' + self.df.filename
