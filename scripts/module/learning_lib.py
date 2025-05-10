@@ -108,12 +108,25 @@ class FocalLossBCE(nn.Module):
         bce_loss = self.bce(logits, targets)
         return self.bce_weight * bce_loss + self.focal_weight * focal_loss
 
+class BCEWithLogitsLossWithLabelSmoothing(nn.Module):
+    def __init__(self, smoothing=0.05, reduction='mean'):
+        super().__init__()
+        self.smoothing = smoothing
+        self.reduction = reduction
+        self.criterion = nn.BCEWithLogitsLoss(reduction=reduction)
+
+    def forward(self, inputs, targets):
+        # 1→1−ε, 0→ε でスムージング（ラベルがfloatでも対応可能）
+        smoothed_targets = targets * (1 - self.smoothing) + 0.5 * self.smoothing
+        return self.criterion(inputs, smoothed_targets)
 
 def get_criterion(cfg):
     if cfg.criterion == 'BCEWithLogitsLoss':
         criterion = nn.BCEWithLogitsLoss()
     elif cfg.criterion == 'CrossEntropyLoss':
         criterion = nn.CrossEntropyLoss()
+    elif cfg.criterion == 'BCEWithLogitsLossWithLS':
+        criterion = BCEWithLogitsLossWithLabelSmoothing(smoothing=cfg.label_smoothing)
     elif cfg.criterion == 'FocalLossBCE':
         return FocalLossBCE(alpha=0.25, gamma=2.0, reduction='mean', bce_weight=0.6, focal_weight=1.4)
     else:

@@ -150,3 +150,61 @@ def plot_and_play_audio(filename, base_dir, sr=32000):
 
     # 音声再生
     return Audio(y, rate=sr)
+
+
+import numpy as np
+import librosa
+import matplotlib.pyplot as plt
+from matplotlib.ticker import FuncFormatter, MultipleLocator
+from IPython.display import Audio
+
+def seconds_and_minutes_formatter(x, pos):
+    """秒数と分:秒表記を同時に表示するフォーマッタ"""
+    minutes = int(x) // 60
+    seconds = int(x) % 60
+    return f"{int(x)}s\n({minutes}:{seconds:02d})"
+
+#文字の大きさ
+
+def plot_power(rec, base_path='../data/raw/train_audio/', chunk_len=0.05):
+    """
+    指定された音声ファイルを読み込み、パワー（dB）を時間方向にプロットする関数
+    """
+    filepath = f'{base_path}/{rec}'
+
+    # 音声ロード
+    wav, sr = librosa.load(filepath)
+    
+    # ★ここで長さを表示！
+    print(f"Audio length: {len(wav)/sr:.2f} seconds")
+
+    # パワー計算
+    power = wav ** 2
+
+    # チャンクごとにパワー合計
+    chunk = int(chunk_len * sr)
+    pad = int(np.ceil(len(power) / chunk) * chunk - len(power))
+    power = np.pad(power, (0, pad))
+    power = power.reshape((-1, chunk)).sum(axis=1)
+
+    # 時間軸
+    t = np.arange(len(power)) * chunk_len
+
+    # プロット
+    fig, ax = plt.subplots(figsize=(24, 6))
+    ax.plot(t, 10 * np.log10(power + 1e-12))  # log(0)対策
+    ax.set_title(f"Recording: {rec}")
+    ax.set_xlabel("Time [sec] (min:sec)")
+    ax.set_ylabel("Power (dB)")
+
+    # 横軸フォーマット変更
+    ax.xaxis.set_major_formatter(FuncFormatter(seconds_and_minutes_formatter))
+
+    # 10秒ごとに目盛りを設定
+    ax.xaxis.set_major_locator(MultipleLocator(10))
+
+    ax.grid(True)
+
+    plt.show()
+
+    return Audio(filepath, rate=sr)

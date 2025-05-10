@@ -7,9 +7,9 @@ def apply_tta(spec, tta_idx):
         return spec
     elif tta_idx == 1:
         # Time shift (horizontal flip)
-        return np.flip(spec, axis=1)
+        return np.flip(spec, axis=1).copy()
     elif tta_idx == 2:
         # Frequency shift (vertical flip)
-        return np.flip(spec, axis=0)
+        return np.flip(spec, axis=0).copy()
     else:
         return spec

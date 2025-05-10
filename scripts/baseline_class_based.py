@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # coding: utf-8
 
-# In[2]:
+# In[15]:
 
 
 import os
@@ -33,7 +33,7 @@ from torch.utils.data import Dataset, DataLoader
 import matplotlib.pyplot as plt
 import seaborn as sns
 from tqdm.auto import tqdm
-
+import json
 import timm
 
 from importlib import reload
@@ -44,19 +44,114 @@ from module import preprocess_lib, datasets_lib, utils_lib, models_lib, learning
 reload(config_lib)
 
 
-# In[3]:
+# In[16]:
 
 
-cfg = config_lib.CFG(mode="train", kaggle_notebook=False, debug=False)
 
 
-# In[4]:
+class CFG:
+    def __init__(self, mode="train", kaggle_notebook=False, debug=False):
+        assert mode in ["train", "inference"], "mode must be 'train' or 'inference'"
+        self.mode = mode
+        self.KAGGLE_NOTEBOOK = kaggle_notebook
+        self.debug = debug
+
+        # ===== Path Settings =====
+        if self.KAGGLE_NOTEBOOK:
+            self.OUTPUT_DIR = ''
+            self.train_datadir = '/kaggle/input/birdclef-2025/train_audio'
+            self.train_csv = '/kaggle/input/birdclef-2025/train.csv'
+            self.test_soundscapes = '/kaggle/input/birdclef-2025/test_soundscapes'
+            self.submission_csv = '/kaggle/input/birdclef-2025/sample_submission.csv'
+            self.taxonomy_csv = '/kaggle/input/birdclef-2025/taxonomy.csv'
+            self.spectrogram_npy = '/kaggle/input/birdclef25-mel-spectrograms/birdclef2025_melspec_5sec_256_256.npy'
+            self.model_path = '/kaggle/input/birdclef-2025-0330'
+        else:
+            self.OUTPUT_DIR = '../data/result/'
+            self.RAW_DIR = '../data/raw/'
+            self.PROCESSED_DIR = '../data/processed/'
+            self.train_datadir = '../data/raw/train_audio/'
+            self.train_csv = '../data/raw/train.csv'
+            self.test_soundscapes = '../data/raw/test_soundscapes/'
+            self.submission_csv = '../data/raw/sample_submission.csv'
+            self.taxonomy_csv = '../data/raw/taxonomy.csv'
+            self.models_dir = "../models/" # 全modelの保存先
+            self.model_path = self.models_dir # 各モデルの保存先．学習時に動的に変更．
+            
+            self.spectrogram_npy = '../data/processed/mel_0411/birdclef2025_melspec_5sec_256_256.npy'
+            self.pseudo_label_csv = "../data/processed/pseudo_labels/ensemble_7sec_pseudoth0.5/pseudo_label.csv"
+            self.pseudo_melspec_npy = "../data/processed/train_soundscapes_0407/train_soundscapes_melspecs.npy"
+
+        # ===== Model Settings =====
+        self.model_name = 'efficientnet_b0'
+        self.pretrained = True if mode == "train" else False
+        self.in_channels = 1
+
+        # ===== Audio Settings =====
+        self.FS = 32000
+        self.WINDOW_SIZE = 5.0 # 推論時のウィンドウサイズ
+        self.TARGET_DURATION = 5.0 # データセット作成時のウィンドウサイズ
+        self.TARGET_SHAPE = (256, 256)
+        self.N_FFT = 1024
+        self.HOP_LENGTH = 512
+        self.N_MELS = 128
+        self.FMIN = 50
+        self.FMAX = 14000        
+
+        # ===== Training Mode =====
+        if mode == "train":
+            self.seed = 42
+            self.apex = False
+            self.print_freq = 100
+            self.num_workers = 2
+
+            self.LOAD_DATA = True
+            self.epochs = 10
+            self.batch_size = 32
+            self.criterion = 'BCEWithLogitsLoss'
+
+            self.n_fold = 5
+            self.selected_folds = [0, 1, 2, 3, 4]
+
+            self.optimizer = 'AdamW'
+            self.lr = 5e-4
+            self.weight_decay = 1e-5
+            self.scheduler = 'CosineAnnealingLR'
+            self.min_lr = 1e-6
+            self.T_max = self.epochs
+
+            self.aug_prob = 0.5
+            self.mixup_alpha_real = 0.5
+            self.mixup_alpha_pseudo = 0.5
+            
+            self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
+            
+            self.use_pseudo_mixup = False  # pseudo lableでmixupするかどうか
+            self.pseudo_mix_prob = 0.4  # mixupでpseudo lableを使う確率
+            self.pseudo_conf_threshold = 0.5
+            
+
+            if self.debug:
+                self.epochs = 2
+                self.selected_folds = [0]
+                self.batch_size = 4
+                
+
+
+# In[17]:
+
+
+cfg = CFG(mode="train", kaggle_notebook=False, debug=False)
+
+
+# In[18]:
 
 
 utils_lib.set_seed(cfg.seed)
 
 
-# In[5]:
+# In[19]:
+
 
 
 class BirdCLEFTrainer:
@@ -67,6 +162,8 @@ class BirdCLEFTrainer:
         self.models_lib = models_lib
         self.learning_lib = learning_lib
         self.spectrograms = None
+        self.pseudo_df = None
+        self.pseudo_melspecs = None
         self.best_scores = []
         self.train_metrics = {}
         self.val_metrics = {}
@@ -77,16 +174,35 @@ class BirdCLEFTrainer:
         self._save_config()
         self._load_taxonomy()
         self._load_spectrograms()
+        
+        if self.cfg.use_pseudo_mixup:
+            self._load_pseudo_data()
 
     def _setup_model_dir(self):
         if self.cfg.debug:
+            current_time = "debug"
             self.cfg.model_path = os.path.join(self.cfg.models_dir, "models_debug")
         else:
             japan_time = datetime.now(timezone(timedelta(hours=9)))
             current_time = japan_time.strftime('%Y%m%d_%H%M')
             self.cfg.model_path = os.path.join(self.cfg.models_dir, f"models_{current_time}")
+
         os.makedirs(self.cfg.model_path, exist_ok=True)
         print(f"[INFO] Models will be saved to: {self.cfg.model_path}")
+
+        # dataset-metadata.jsonを保存
+        dataset_metadata = {
+            "title": f"bc25-models-{current_time}",
+            "id": f"ihiratch/bc25-models-{current_time}",
+            "licenses": [
+                {
+                    "name": "CC0-1.0"
+                }
+            ]
+        }
+        metadata_path = os.path.join(self.cfg.model_path, "dataset-metadata.json")
+        with open(metadata_path, "w") as f:
+            json.dump(dataset_metadata, f, indent=2)
 
     def _save_config(self):
         cfg_dict = vars(self.cfg)
@@ -102,34 +218,88 @@ class BirdCLEFTrainer:
         self.label2index = {label: i for i, label in enumerate(species_ids)}
 
     def _load_spectrograms(self):
-        print("Loading pre-computed mel spectrograms from NPY file...")
+        print(f"Loading pre-computed mel spectrograms from NPY file, from the path: {self.cfg.spectrogram_npy}")
         self.spectrograms = np.load(self.cfg.spectrogram_npy, allow_pickle=True).item()
         print(f"Loaded {len(self.spectrograms)} pre-computed mel spectrograms")
+        
+    def _load_pseudo_data(self):
+        print("📥 Loading pseudo label CSV and melspecs...")
+
+        # row_id を index にして読み込む（← ここがポイント！）
+        self.pseudo_df = pd.read_csv(self.cfg.pseudo_label_csv, index_col="row_id")
+
+        # 信頼度フィルタリング（例: 最大値が 0.5 未満の行を除く）
+        confidence_threshold = self.cfg.pseudo_conf_threshold
+        max_probs = self.pseudo_df.max(axis=1)
+        self.pseudo_df = self.pseudo_df[max_probs > confidence_threshold]
+        self.pseudo_df = self.pseudo_df.reset_index(drop=False)
+        print(f"✅ Filtered pseudo labels: {len(self.pseudo_df)}")
+
+        # melspec は key が row_id の dict を想定
+        self.pseudo_melspecs = np.load(self.cfg.pseudo_melspec_npy, allow_pickle=True)
+        print(f"✅ Loaded pseudo mel-spectrograms: {len(self.pseudo_melspecs)}")
+        
+    def _create_train_dataset(self, train_df):
+        if self.cfg.use_pseudo_mixup:
+            print("🔀 Using BirdCLEFDatasetWithPseudo (with pseudo label mixup)")
+            return self.datasets_lib.BirdCLEFDatasetWithPseudo(
+                train_df=train_df,
+                pseudo_df=self.pseudo_df,
+                cfg=self.cfg,
+                spectrograms=self.spectrograms,
+                pseudo_melspecs=self.pseudo_melspecs,
+                mode='train'
+            )
+        else:
+            print("📦 Using BirdCLEFDatasetFromNPY (no pseudo mixup)")
+            return self.datasets_lib.BirdCLEFDatasetFromNPY(
+                train_df, self.cfg, self.spectrograms, mode='train'
+            )   
 
     def _calculate_auc(self, targets, outputs):
         probs = 1 / (1 + np.exp(-outputs))
-        aucs = [roc_auc_score(targets[:, i], probs[:, i]) for i in range(targets.shape[1]) if np.sum(targets[:, i]) > 0]
+
+        # 👇 ROC AUC はバイナリラベルを必要とするので、soft labelを2値化
+        targets_bin = (targets >= 0.5).astype(int)
+
+        aucs = [roc_auc_score(targets_bin[:, i], probs[:, i]) 
+                for i in range(targets.shape[1]) if np.sum(targets_bin[:, i]) > 0]
         return np.mean(aucs) if aucs else 0.0
 
     def _calculate_classwise_auc(self, targets, outputs):
         probs = 1 / (1 + np.exp(-outputs))
+
+        # バイナリ化（連続値でもintでも安全）
+        targets_bin = (targets >= 0.5).astype(int)
+
         classwise_auc = {}
         for i in range(targets.shape[1]):
-            if np.sum(targets[:, i]) > 0:
-                classwise_auc[i] = roc_auc_score(targets[:, i], probs[:, i])
+            if np.sum(targets_bin[:, i]) > 0:
+                try:
+                    classwise_auc[i] = roc_auc_score(targets_bin[:, i], probs[:, i])
+                except ValueError:
+                    classwise_auc[i] = np.nan  # エラー出たときも安心
         return classwise_auc
 
     def _calculate_classwise_ap(self, targets, outputs):
         probs = 1 / (1 + np.exp(-outputs))
+
+        # ラベルをバイナリ化（soft label対応）
+        targets_bin = (targets >= 0.5).astype(int)
+
         classwise_ap = {}
         for i in range(targets.shape[1]):
-            if np.sum(targets[:, i]) > 0:
-                classwise_ap[i] = average_precision_score(targets[:, i], probs[:, i])
+            if np.sum(targets_bin[:, i]) > 0:
+                try:
+                    classwise_ap[i] = average_precision_score(targets_bin[:, i], probs[:, i])
+                except ValueError:
+                    classwise_ap[i] = np.nan
         return classwise_ap
-
+    
     def _calculate_map(self, targets, outputs):
         classwise_ap = self._calculate_classwise_ap(targets, outputs)
-        return np.mean(list(classwise_ap.values())) if classwise_ap else 0.0
+        values = [v for v in classwise_ap.values() if v is not None and not np.isnan(v)]
+        return np.mean(values) if values else 0.0
 
     def _save_classwise_scores_to_csv(self, classwise_auc, classwise_ap, fold, filename_prefix):
         rows = []
@@ -154,6 +324,7 @@ class BirdCLEFTrainer:
                     inputs = batch['melspec'][i].unsqueeze(0).to(device)
                     target = batch['target'][i].unsqueeze(0).to(device)
                     optimizer.zero_grad()
+            
                     output = model(inputs)
                     loss = criterion(output, target)
                     loss.backward()
@@ -229,6 +400,7 @@ class BirdCLEFTrainer:
 
         all_outputs = np.concatenate(all_outputs)
         all_targets = np.concatenate(all_targets)
+        # print("Size of validation:",  len(all_targets))
         self.val_metrics = {
             'val_loss': np.mean(losses),
             'val_auc': self._calculate_auc(all_targets, all_outputs),
@@ -250,8 +422,10 @@ class BirdCLEFTrainer:
             print(f"Training set: {len(train_df)} samples")
             print(f"Validation set: {len(val_df)} samples")
 
-            train_dataset = self.datasets_lib.BirdCLEFDatasetFromNPY(train_df, self.cfg, self.spectrograms, mode='train')
-            val_dataset = self.datasets_lib.BirdCLEFDatasetFromNPY(val_df, self.cfg, self.spectrograms, mode='valid')
+            train_dataset = self._create_train_dataset(train_df)
+            val_dataset = self.datasets_lib.BirdCLEFDatasetFromNPY(
+                val_df, self.cfg, self.spectrograms, mode='valid'
+            )
 
             train_loader = DataLoader(train_dataset, batch_size=self.cfg.batch_size, shuffle=True, 
                                        num_workers=self.cfg.num_workers, pin_memory=True,
@@ -327,6 +501,19 @@ class BirdCLEFTrainer:
                 log_entry.update(train_log)
                 log_entry.update(val_log)
                 log_history.append(log_entry)
+            
+            # print("Saving final model at last epoch...")
+            # torch.save({
+            #     'model_state_dict': model.state_dict(),
+            #     'optimizer_state_dict': optimizer.state_dict(),
+            #     'scheduler_state_dict': scheduler.state_dict() if scheduler else None,
+            #     'epoch': epoch,
+            #     'val_auc': val_auc,
+            #     'train_auc': train_auc,
+            #     "index2label": self.index2label,
+            #     'cfg': self.cfg
+            # }, f"{self.cfg.model_path}/model_fold{fold}_last.pth")
+                
 
             pd.DataFrame(log_history).to_csv(f"{self.cfg.model_path}/log_fold{fold}.csv", index=False)
             self.best_scores.append(best_auc)
@@ -344,8 +531,8 @@ class BirdCLEFTrainer:
         print("="*60)
 
 
+# In[20]:
 
-# In[ ]:
 
 
 if __name__ == "__main__":
@@ -362,7 +549,13 @@ if __name__ == "__main__":
 # In[ ]:
 
 
-trainer.index2label
+
+
+
+# In[ ]:
+
+
+
 
 
 # In[ ]:

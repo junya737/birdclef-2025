@@ -20,6 +20,8 @@ class CFG:
             self.model_path = '/kaggle/input/birdclef-2025-0330'
         else:
             self.OUTPUT_DIR = '../data/result/'
+            self.RAW_DIR = '../data/raw/'
+            self.PROCESSED_DIR = '../data/processed/'
             self.train_datadir = '../data/raw/train_audio/'
             self.train_csv = '../data/raw/train.csv'
             self.test_soundscapes = '../data/raw/test_soundscapes/'
@@ -36,8 +38,8 @@ class CFG:
 
         # ===== Audio Settings =====
         self.FS = 32000
-        self.WINDOW_SIZE = 5.0
-        self.TARGET_DURATION = 5.0
+        self.WINDOW_SIZE = 5.0 # 推論時のウィンドウサイズ
+        self.TARGET_DURATION = 5.0 # データセット作成時のウィンドウサイズ
         self.TARGET_SHAPE = (256, 256)
         self.N_FFT = 1024
         self.HOP_LENGTH = 512

@@ -13,6 +13,7 @@ import cv2
 import math
 import warnings
 from pathlib import Path
+import datetime
 
 import numpy as np
 import pandas as pd
@@ -41,9 +42,10 @@ from module import preprocess_lib, datasets_lib, utils_lib, models_lib, learning
 reload(config_lib)
 
 
-# In[2]:
+# In[ ]:
 
 
+"TODO: modelsの中にconfigがひと目で分かるtcsvを入れたい"
 cfg = config_lib.CFG(mode="train", kaggle_notebook=False, debug=False)
 
 
@@ -174,6 +176,7 @@ def validate(model, loader, criterion, device):
     
     return avg_loss, auc
 
+# macro average AUC that ignores classes with no positive samples
 def calculate_auc(targets, outputs):
   
     num_classes = targets.shape[1]
@@ -198,6 +201,19 @@ def run_training(df, cfg):
     
     if cfg.debug:
         df = df.head(100).reset_index(drop=True)
+    
+    # debug modeの場合は，models_debugに保存．それ以外はmodels_{current_time}に保存
+    if cfg.debug:
+        model_path = os.path.join(cfg.model_dir, "models_debug")
+    else:
+        current_time = datetime.datetime.now().strftime('%Y%m%d_%H%M')
+        model_path = os.path.join(cfg.model_dir, f"models_{current_time}")
+
+    os.makedirs(model_path, exist_ok=True)
+    cfg.model_dir = model_path  # 保存先を上書き
+
+    print(f"[INFO] Models will be saved to: {cfg.model_dir}")
+        
     taxonomy_df = pd.read_csv(cfg.taxonomy_csv)
     species_ids = taxonomy_df['primary_label'].tolist()
     cfg.num_classes = len(species_ids)
@@ -211,7 +227,7 @@ def run_training(df, cfg):
     skf = StratifiedKFold(n_splits=cfg.n_fold, shuffle=True, random_state=cfg.seed)
     
     best_scores = []
-    
+    log_history = []
     for fold, (train_idx, val_idx) in enumerate(skf.split(df, df['primary_label'])):
         if fold not in cfg.selected_folds:
             continue
@@ -266,6 +282,7 @@ def run_training(df, cfg):
         
         for epoch in range(cfg.epochs):
             print(f"\nEpoch {epoch+1}/{cfg.epochs}")
+            epoch_start_time = time.time()  # ← ここで時間を記録
             
             train_loss, train_auc = train_one_epoch(
                 model, 
@@ -300,7 +317,21 @@ def run_training(df, cfg):
                     'val_auc': val_auc,
                     'train_auc': train_auc,
                     'cfg': cfg
-                }, f"{cfg.MODEL_DIR}/model_fold{fold}.pth")
+                }, f"{cfg.model_dir}/model_fold{fold}.pth")
+            
+            epoch_time = (time.time() - epoch_start_time) / 60  # ← 分に変換
+            
+            log_history.append({
+                'epoch': epoch + 1,
+                'train_loss': train_loss,
+                'train_auc': train_auc,
+                'val_loss': val_loss,
+                'val_auc': val_auc,
+                'lr': scheduler.get_last_lr()[0] if scheduler else cfg.lr,
+                'epoch_time_min': round(epoch_time, 2)  # ← カラム名も合わせて変更
+            })
+        log_df = pd.DataFrame(log_history)
+        log_df.to_csv(f"{cfg.model_dir}/log_fold{fold}.csv", index=False)
         
         best_scores.append(best_auc)
         print(f"\nBest AUC for fold {fold}: {best_auc:.4f} at epoch {best_epoch}")
@@ -318,7 +349,7 @@ def run_training(df, cfg):
     print("="*60)
 
 
-# In[ ]:
+# In[6]:
 
 
 if __name__ == "__main__":

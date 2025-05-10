@@ -8,7 +8,7 @@ from multiprocessing import Pool, freeze_support
 from datetime import datetime, timedelta, timezone
 
 # ===== 無音検出関数（パワー閾値ベース） =====
-def detect_silence_segments(filepath, audio_dir, chunk_len_sec=0.1, power_thresh_db=-40.0):
+def detect_silence_segments(filepath, audio_dir, chunk_len_sec=0.1, power_thresh_db=-60.0):
     try:
         y, sr = librosa.load(filepath, sr=32000)
         power = y ** 2
@@ -74,10 +74,10 @@ def run_silence_detection_all(audio_dir, n_jobs=4, debug=False, debug_count=50):
     # JSTで保存ディレクトリを作成
     JST = timezone(timedelta(hours=9), 'JST')
     timestamp = datetime.now(JST).strftime("%Y%m%d_%H%M")
-    output_dir = f"../data/processed/silence_segments_{timestamp}"
+    output_dir = f"../data/processed/silence_segments"
     os.makedirs(output_dir, exist_ok=True)
 
-    output_csv = os.path.join(output_dir, "silence_segments.csv")
+    output_csv = os.path.join(output_dir, f"silence_segments_{timestamp}.csv")
     silence_df.to_csv(output_csv, index=False)
     print(f"\n✅ 無音区間を保存しました: {output_csv}")
     print(silence_df.head())
