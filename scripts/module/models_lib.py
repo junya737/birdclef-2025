@@ -88,7 +88,7 @@ class BirdCLEFModelForTrain(nn.Module):
         self.feat_dim = backbone_out
         
         self.classifier = nn.Linear(backbone_out, cfg.num_classes)
-        
+        # 活性化関数不在．
         self.mixup_enabled = hasattr(cfg, 'mixup_alpha') and cfg.mixup_alpha > 0
         if self.mixup_enabled:
             self.mixup_alpha = cfg.mixup_alpha

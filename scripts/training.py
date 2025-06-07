@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # coding: utf-8
 
-# In[1]:
+# In[2]:
 
 
 import os
@@ -24,13 +24,16 @@ from torch.utils.data import Dataset, DataLoader
 import matplotlib.pyplot as plt
 from tqdm.auto import tqdm
 import json
-torch.backends.cuda.matmul.allow_tf32 = True
-torch.backends.cudnn.allow_tf32 = True
+
+import timm
+from torch import nn
+import torch.nn.functional as F
+
 
 logging.basicConfig(level=logging.ERROR)
 
 
-# In[2]:
+# In[3]:
 
 
 print("CUDA available:", torch.cuda.is_available())
@@ -40,7 +43,7 @@ print("Tensor device:", torch.tensor([1.0], device="cuda").device)
 print(torch.cuda.get_arch_list())
 
 
-# In[3]:
+# In[4]:
 
 
 class BirdCLEFDatasetFromNPY_Mixup(Dataset):
@@ -146,6 +149,163 @@ class BirdCLEFDatasetFromNPY_Mixup(Dataset):
         return spec
 
 
+# In[5]:
+
+
+class BirdCLEFModelForTrain(nn.Module):
+    def __init__(self, cfg):
+        super().__init__()
+        self.cfg = cfg
+        
+        self.backbone = timm.create_model(
+            cfg.model_name,
+            pretrained=cfg.pretrained,
+            in_chans=cfg.in_channels,
+            drop_rate=0.2,
+            drop_path_rate=0.2,
+        )
+        
+        if 'efficientnet' in cfg.model_name:
+            backbone_out = self.backbone.classifier.in_features
+            self.backbone.classifier = nn.Identity()
+        elif 'resnet' in cfg.model_name:
+            backbone_out = self.backbone.fc.in_features
+            self.backbone.fc = nn.Identity()
+        else:
+            backbone_out = self.backbone.get_classifier().in_features
+            self.backbone.reset_classifier(0, '')
+        
+        self.pooling = nn.AdaptiveAvgPool2d(1)
+            
+        self.feat_dim = backbone_out
+        
+        self.classifier = nn.Linear(backbone_out, cfg.num_classes)
+        # 活性化関数不在．
+        self.mixup_enabled = hasattr(cfg, 'mixup_alpha') and cfg.mixup_alpha > 0
+        if self.mixup_enabled:
+            self.mixup_alpha = cfg.mixup_alpha
+            
+    def forward(self, x, targets=None):
+    
+        if self.training and self.mixup_enabled and targets is not None:
+            mixed_x, targets_a, targets_b, lam = self.mixup_data(x, targets)
+            x = mixed_x
+        else:
+            targets_a, targets_b, lam = None, None, None
+        
+        features = self.backbone(x)
+        
+        if isinstance(features, dict):
+            features = features['features']
+            
+        if len(features.shape) == 4:
+            features = self.pooling(features)
+            features = features.view(features.size(0), -1)
+        
+        logits = self.classifier(features)
+        
+        if self.training and self.mixup_enabled and targets is not None:
+            loss = self.mixup_criterion(F.binary_cross_entropy_with_logits, 
+                                       logits, targets_a, targets_b, lam)
+            return logits, loss
+            
+        return logits
+    
+    def mixup_data(self, x, targets):
+        """Applies mixup to the data batch"""
+        batch_size = x.size(0)
+
+        lam = np.random.beta(self.mixup_alpha, self.mixup_alpha)
+
+        indices = torch.randperm(batch_size).to(x.device)
+
+        mixed_x = lam * x + (1 - lam) * x[indices]
+        
+        return mixed_x, targets, targets[indices], lam
+    
+    def mixup_criterion(self, criterion, pred, y_a, y_b, lam):
+        """Applies mixup to the loss function"""
+        return lam * criterion(pred, y_a) + (1 - lam) * criterion(pred, y_b)
+    
+    
+class BirdCLEFModelForTrain_Coat(nn.Module):
+    def __init__(self, cfg):
+        super().__init__()
+        self.cfg = cfg
+        
+        # CoaT専用: drop_path_rateを0にする
+        self.backbone = timm.create_model(
+            cfg.model_name,
+            pretrained=cfg.pretrained,
+            in_chans=cfg.in_channels,
+            drop_rate=0.2,
+            drop_path_rate=0.0  # <= ここを0.0に！
+        )
+        
+        # CoaTは reset_classifier が必要
+        backbone_out = self.backbone.get_classifier().in_features
+        self.backbone.reset_classifier(0, 'avg')  # <= global_pool='avg'
+        
+        self.pooling = nn.AdaptiveAvgPool2d(1)
+        self.feat_dim = backbone_out
+        self.classifier = nn.Linear(backbone_out, cfg.num_classes)
+
+    def forward(self, x):
+        features = self.backbone(x)
+        
+        if isinstance(features, dict):
+            features = features['features']
+            
+        if len(features.shape) == 4:
+            features = self.pooling(features)
+            features = features.view(features.size(0), -1)
+        
+        logits = self.classifier(features)
+        return logits
+    
+
+class BirdCLEFModelForTrain_Swin(nn.Module):
+    def __init__(self, cfg):
+        super().__init__()
+        self.cfg = cfg
+        
+        self.backbone = timm.create_model(
+            cfg.model_name,
+            pretrained=cfg.pretrained,
+            in_chans=cfg.in_channels,
+            drop_rate=0.2,
+            drop_path_rate=0.2
+        )
+        
+        backbone_out = self.backbone.head.in_features
+        self.backbone.reset_classifier(0)
+
+        self.pooling = nn.AdaptiveAvgPool2d(1)  # 2Dプーリングに変更！！
+        self.classifier = nn.Linear(backbone_out, cfg.num_classes)
+
+    def forward(self, x):
+        features = self.backbone(x)
+
+        if isinstance(features, dict):
+            features = features['features']
+
+        if features.ndim == 4:
+            # CNN系 (B, C, H, W)
+            features = self.pooling(features)
+            features = features.flatten(1)
+        elif features.ndim == 3:
+            # Transformer系 (B, N, C)
+            features = features.mean(dim=1)
+        elif features.ndim == 2:
+            # もう (B, C) になってる（例えば SwinTiny）
+            pass  # 何も加工しない
+        else:
+            raise ValueError(f"Unexpected feature shape: {features.shape}")
+
+        logits = self.classifier(features)
+        return logits
+
+
 # In[ ]:
 
 
@@ -182,16 +342,14 @@ class CFG:
             self.taxonomy_csv = '../data/raw/taxonomy.csv'
             self.models_dir = "../models/" # 全modelの保存先
             self.model_path = self.models_dir # 各モデルの保存先．学習時に動的に変更．
-            self.pseudo_label_csv = "../data/processed/pseudo_labels/ensemble_7sec_pseudoth0.5/pseudo_label.csv"
-            self.pseudo_melspec_npy = "../data/processed/train_soundscapes_0407/train_soundscapes_melspecs.npy"
 
             # ローカルならここを変更する．
-            self.train_csv = '../data/processed/mel_safezone1000_head/train.csv'
-            self.spectrogram_npy = '../data/processed/mel_safezone1000_head/birdclef2025_melspec_5sec_256_256.npy'
+            self.train_csv = '../data/processed/pretrain_0529/train.csv'
+            self.spectrogram_npy = '../data/processed/pretrain_0529/birdclef2025_melspec_5sec_256_256.npy'
 
 
         # ===== Model Settings =====
-        self.model_name = 'efficientnet_b0' # tf_efficientnetv2_b3
+        self.model_name = "efficientnet_b0" # tf_efficientnetv2_b3   efficientnet_b0
         self.pretrained = True if mode == "train" else False
         self.in_channels = 1
 
@@ -211,13 +369,12 @@ class CFG:
             self.num_workers = 2
 
             self.LOAD_DATA = True
-            self.epochs = 7
+            self.epochs = 10
             self.batch_size = 32
             self.criterion = 'BCEWithLogitsLoss'
-            self.label_smoothing = 0.05
 
             self.n_fold = 5
-            self.selected_folds = [0]
+            self.selected_folds = [0] # foldの選択
 
             self.optimizer = 'AdamW'
             self.lr = 5e-4
@@ -225,13 +382,13 @@ class CFG:
             self.scheduler = 'CosineAnnealingLR'
             self.min_lr = 1e-6
             self.T_max = self.epochs
-            self.full_train = True
+            self.full_train = False
             self.is_RareFull = False # レア種は全部train foldにする
             self.aug_prob = 0.5 # spec augmentの確率
             
             # mixupの設定
             self.use_mixup = True
-            self.mixup_alpha = 0.4
+            self.mixup_alpha =  0.4
             self.mixup_prob = 0.5
             
             self.secondary_labels = True # secondary_labelsを使うかどうか
@@ -256,7 +413,7 @@ class CFG:
                 
 
 
-# In[16]:
+# In[7]:
 
 
 cfg = CFG(mode="train", kaggle_notebook=False, debug=False)
@@ -266,7 +423,7 @@ if cfg.KAGGLE_NOTEBOOK:
 from module import  datasets_lib, models_lib, learning_lib, utils_lib
 
 
-# In[17]:
+# In[8]:
 
 
 # trainの処理をクラスで実行．
@@ -558,8 +715,23 @@ class BirdCLEFTrainer:
             val_loader = DataLoader(val_dataset, batch_size=self.cfg.batch_size, shuffle=False,
                                      num_workers=self.cfg.num_workers, pin_memory=True,
                                      collate_fn=self.datasets_lib.collate_fn)
-
-            model = self.models_lib.BirdCLEFModelForTrain(self.cfg).to(self.cfg.device)
+            # coatが文字列に含まれていれば
+            if 'coat' in self.cfg.model_name:
+                print("Using CoaT model")
+                print(cfg.model_name)
+                model = BirdCLEFModelForTrain_Coat(self.cfg).to(self.cfg.device)
+            
+            elif 'swin' in self.cfg.model_name:
+                print("Using Swin model")
+                print(cfg.model_name)
+                model = BirdCLEFModelForTrain_Swin(self.cfg).to(self.cfg.device)
+            else:
+                print("efficientNet model")
+                print(cfg.model_name)
+                model = BirdCLEFModelForTrain(self.cfg).to(self.cfg.device)
+                
+                
+                
             optimizer = self.learning_lib.get_optimizer(model, self.cfg)
             criterion = self.learning_lib.get_criterion(self.cfg)
 
@@ -646,7 +818,7 @@ class BirdCLEFTrainer:
         print("="*60)
 
 
-# In[18]:
+# In[9]:
 
 
 # レア種はfold=-1にする．
@@ -665,7 +837,7 @@ def overwrite_fold_for_rare_classes(df, rare_threshold=5):
     return df
 
 
-# In[19]:
+# In[10]:
 
 
 # モデルはmodels_{current_time}に保存される．
@@ -688,3 +860,4 @@ if __name__ == "__main__":
     trainer = BirdCLEFTrainer(cfg, train_df, taxonomy_df,  datasets_lib, models_lib, learning_lib)
     trainer.run()
     print("\nTraining complete!")
+
